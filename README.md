@@ -11,4 +11,4 @@ Run `kernel.SlackBuild.rt` without arguments to get help. This will download, co
 Notes
 -----
 
-This repository is a copy of the `http://ftp.slax.org/Slax-7.x-development/sources/Slax-7.0-sources/kernel/` directory with modified scripts to exchange the bundled Linux kernel with its real-time version.
+This repository is a copy of the http://ftp.slax.org/Slax-7.x-development/sources/Slax-7.0-sources/kernel/ directory with modified scripts to exchange the bundled Linux kernel with its real-time version.
