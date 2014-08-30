@@ -1,0 +1,178 @@
+#!/bin/bash
+
+# sorry guys, this is the worst shell script I've ever written - I wanted
+#   to keep it highly compatible (diffable) with the original one
+
+set -e
+
+[ $# -eq 1 ] || [ $# -eq 2 -a "$1" = '-b' ] || {
+  echo "USAGE: $0 [-b] <path_to_installed_slax>"
+  echo "       -b do a clean bootstrap before kernel recompilation"
+  exit 1
+}
+
+[ "$1" = '-b' ] && {
+  BOOTSTRAP=yes
+  shift
+}
+
+type sudo >/dev/null 2>&1 || {
+  echo ERR sudo required >&2
+  exit 1
+}
+
+#VER=3.8.2
+VER=3.8.4
+RTVER='rt2'
+DST="$PWD/linux-$VER"
+PKG=/tmp/kernel-$VER
+SRC=$(realpath .)/aufs3-standalone.git/
+SUFFIX=".backup_$(date '+%Y%m%d_%H%M%S')"
+SLAXDIR="$1"
+# Linux's make system obeys this variable
+export MYARCH
+
+[ -n "$BOOTSTRAP" ] && {
+  # http://ftp.slax.org/Slax-7.x-development/sources/Slax-7.0-sources/
+  tar -xf additions.tar.gz
+
+  # FIXME
+  [ "$VER" = '3.8.4' ]
+  [ "$RTVER" = 'rt2' ]
+  # FIXME add .sign check?
+  wget -c https://www.kernel.org/pub/linux/kernel/projects/rt/3.8/older/patch-$VER-$RTVER.patch.xz
+
+  printf '%s\n%s\n' \
+      'aufs3-standalone.git origin/aufs3.8' \
+      'aufs-util.git        origin/aufs3.0' | while read g b; do
+    [ -d "$g" ] || git clone --depth 1 --no-single-branch \
+      "git://aufs.git.sourceforge.net/gitroot/aufs/$g" "$g"
+    (
+      cd "$g"
+      git checkout "$b"
+    )
+  done
+
+  wget -c http://www.kernel.org/pub/linux/kernel/v3.0/linux-$VER.tar.xz
+  rm -Rf "$PKG"
+  umount "$DST" 2>/dev/null | true
+  sudo rm -Rf "$DST"
+  mkdir -p "$DST"
+  MYARCH="$(
+    cd "$DST/.."
+    tar -xf "$SRC/../linux-$VER.tar."*
+    if ./scripts/extract-ikconfig "$SLAXDIR/boot/vmlinuz" |
+        grep CONFIG_64BIT=y >/dev/null; then
+      echo x86_64
+    else
+      echo i486
+    fi
+  )"
+
+  #[ -z "$MYARCH" ] && {
+  #  MYARCH="$(uname -m)"
+  #  case "$MYARCH" in
+  #    i?86) MYARCH=i486 ;;
+  #    arm*) MYARCH=arm ;;
+  #  esac
+  #}
+
+  #mount -t tmpfs -o size="100%" tmpfs $DST
+  (
+    cd "$DST"
+
+    echo 'INFO applying the -rt patchset and aufs patches...'
+    [ -r "$SRC/../patch-$VER-$RTVER.patch.xz" ]
+    xzcat "$SRC/../patch-$VER-$RTVER.patch.xz" | patch -p1
+
+    # apply aufs patches
+    patch -p1 < "$SRC/aufs3-kbuild.patch"
+    patch -p1 < "$SRC/aufs3-base.patch"
+    patch -p1 < "$SRC/aufs3-proc_map.patch"
+    patch -p1 < "$SRC/aufs3-standalone.patch"
+    echo "header-y += aufs_type.h" >> ./include/uapi/linux/Kbuild
+    cp -va "$SRC/Documentation" .
+    cp -va "$SRC/fs" .
+    cp -va "$SRC/include/uapi/linux/aufs_type.h" ./include/uapi/linux
+    cp -va "$SRC/include/linux/aufs_type.h" ./include/linux
+
+    # make mount.aufs dynamic
+    cat "$SRC/../aufs-util.git/Makefile" | sed -r 's/ -static / /' > aaa
+    mv aaa "$SRC/../aufs-util.git/Makefile"
+
+    cat "$SRC/../config-$MYARCH" >.config
+    # rebrand
+    cp "$SRC/../logo_linux_clut224.ppm" drivers/video/logo/
+  )
+}
+
+(
+  cd $DST
+  make clean
+  nice -n 19 make -j 8
+  echo INFO installing the new slax kernel while backing up the current one if any
+  [ -e "$SLAXDIR/boot/vmlinuz" ] &&
+    cp "$SLAXDIR/boot/vmlinuz" "$SRC/../vmlinuz$SUFFIX"
+  cp arch/x86/boot/bzImage "$SLAXDIR/boot/vmlinuz"
+)
+
+echo INFO installing kernel modules and firmware...; {
+  bundle='01-core.sb'
+  extr="$PWD/squash_extract_tmp"
+  sudo unsquashfs -d "$extr" "$SLAXDIR/$bundle"
+
+  # backup current core image (includes among others kernel modules)
+  cp "$SLAXDIR/$bundle" "$bundle$SUFFIX"
+  (
+    cd $DST
+    sudo -- sh -c "rm -rf '$extr/lib/modules'"
+    sudo -- sh -c "rm -rf '$extr/lib/firmware'"
+    sudo make modules_install INSTALL_MOD_PATH="$extr"
+    sudo make firmware_install INSTALL_MOD_PATH="$extr"
+    sudo mkdir -p "$extr/usr/include/"
+    sudo chmod ugo+rX "$extr/usr/"
+    sudo chmod ugo+rX "$extr/usr/include/"
+    # install for all architectures (SLAX currently supports only i386
+    #   and x86_64, but the size overhead is marginal)
+    sudo make headers_install_all INSTALL_HDR_PATH="$extr/usr/include/"
+  )
+}
+
+echo INFO generating new initramfs img...; {
+  LLK='linux-live-kit'
+  LLKVER='1.3+'
+  wget -c "http://ftp.slax.org/Slax-7.x-development/sources/Slax-7.0-sources/slax/$LLK-$LLKVER.tar.xz"
+  [ -e "$LLK" ] && rm -rf "$LLK"
+  tar -xf "$LLK-$LLKVER.tar.xz"
+
+  cp "$SLAXDIR/boot/initrfs.img" "initrfs.img$SUFFIX"
+  # a patched version which correctly handles non-system $LMK paths
+  cp ./initramfs_create.rt "$LLK/initramfs/initramfs_create"
+  (
+    cd "$LLK"
+    cat >> .config <<EOF
+LIVEKITNAME="$(basename "$SLAXDIR")"
+LMK="$extr/lib/modules/$VER-$RTVER/"
+EOF
+    cd ./initramfs/
+    img="$(sudo ./initramfs_create)"
+    sudo chown $USER:$USER "$img"
+    cp "$img" "$SLAXDIR/boot/initrfs.img"
+    rm -f "$img"
+  )
+}
+
+echo INFO generating and saving final $bundle...; {
+  # needed because mksquashfs appends if an img already exists
+  rm -f "$SLAXDIR/$bundle"
+  sudo mksquashfs "$extr" "$SLAXDIR/$bundle" -comp xz -Xbcj x86 -b 512k
+  # can't remove modules before generating initramfs img as some of them
+  #   are needed in there
+  sudo -- sh -c "rm -rf '$extr'"
+}
+
+echo INFO don\'t forget to update MBR using:
+echo      udevil umount "'$(dirname "$SLAXDIR")'"
+echo      sudo mount /dev/sd??? /mnt/???
+echo      sudo -- /mnt/???/slax/boot/bootinst.sh
+echo      sudo umount /mnt/???

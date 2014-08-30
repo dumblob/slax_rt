@@ -1,0 +1,13 @@
+*.tar.gz
+*.tar.xz
+*patch.xz
+
+aufs-util.git/
+aufs3-standalone.git/
+linux-live-kit/
+linux-3.8.4/
+squashfs4.2/
+
+initrfs.img.backup_*
+vmlinuz.backup_*
+01-core.sb.backup_*

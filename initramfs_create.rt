@@ -1,0 +1,105 @@
+#!/bin/bash
+# Create initramfs image
+# Author: Tomas M <http://www.linux-live.org/>
+#
+
+set -e
+
+. ../.config
+
+INITRAMFS=/tmp/$LIVEKITNAME-initramfs-$$
+
+# copy file to initramfs tree, including
+# all library dependencies (as shown by ldd)
+# $2 = file to copy (full path)
+copy_including_deps() (
+  _fake_full_path="$1"
+  shift
+  [ -e "$1" ] || { echo "ERR file/dir doesn't exist: $1" >&2; return 4; }
+  # target exists
+  [ -e "$INITRAMFS/$1" ] && return
+
+  mkdir -p "$INITRAMFS/$_fake_full_path"
+  cp -R "$1" "$INITRAMFS/$_fake_full_path"
+  if [ -L "$1" ]; then
+    DIR="$(dirname "$1")"
+    LNK="$(readlink "$1")"
+    copy_including_deps "$_fake_full_path" "$(cd "$DIR"; realpath -s "$LNK")"
+  fi
+
+  # FIXME use objdump -p instead of ldd for safety
+  ldd "$1" 2>/dev/null | sed -r "s/.*=>|[(].*//g" |
+      sed -r "s/^\\s+|\\s+\$//" | while read LIB; do
+    [ -e "$LIB" ] && copy_including_deps "$_fake_full_path" "$LIB"
+    true
+  done
+)
+
+rm -Rf $INITRAMFS
+mkdir -p $INITRAMFS/{bin,dev,etc,lib,lib64,mnt,proc,root,run,sbin,sys,tmp,usr,var/log}
+
+cd static
+./update
+cd ..
+
+cp static/{busybox,mount.dynfilefs,mount.ntfs-3g} $INITRAMFS/bin
+chmod a+x $INITRAMFS/bin/{busybox,mount.*}
+
+$INITRAMFS/bin/busybox | grep , | grep -v Copyright | tr "," " " | while read LINE; do
+   for TOOL in $LINE; do
+      ln -s busybox $INITRAMFS/bin/$TOOL
+      ln -s ../bin/busybox $INITRAMFS/sbin/$TOOL
+   done
+done
+rm $INITRAMFS/{s,}bin/init
+
+mknod $INITRAMFS/dev/console c 5 1
+mknod $INITRAMFS/dev/null c 1 3
+mknod $INITRAMFS/dev/ram0 b 1 0
+mknod $INITRAMFS/dev/tty1 c 4 1
+mknod $INITRAMFS/dev/tty2 c 4 2
+mknod $INITRAMFS/dev/tty3 c 4 3
+mknod $INITRAMFS/dev/tty4 c 4 4
+
+#copy_including_deps /usr/bin/strace
+#copy_including_deps /usr/bin/lsof
+
+# TODO: add all comon filesystems which are NOT compiled in kernel already
+# /some/weird/path/lib/modules/3.8.4-rt2 -> /lib/modules/3.8.4-rt2/
+fake_full_path="$(printf %s "$LMK" | sed -r 's|.*(/lib/+modules/+.*)$|\1/|')"
+for f in \
+    /$LMK/kernel/fs/squashfs \
+    /$LMK/kernel/drivers/staging/zsmalloc \
+    /$LMK/kernel/drivers/staging/zram \
+    /$LMK/kernel/drivers/block/loop.* \
+    /$LMK/kernel/fs/fuse \
+    /$LMK/modules.*; do
+  # zsmalloc is needed by zram
+  copy_including_deps "$fake_full_path" "$f"
+done
+
+# /some/weird/path/lib/modules/3.8.4-rt2/ -> 3.8.4-rt2
+depmod -b "$INITRAMFS" "$(basename "$LMK")"
+# trim modules.order file. Perhaps we could remove it entirely
+MODULEORDER="$(cd "$INITRAMFS/$fake_full_path/"; find -name "*.ko" | sed -r "s:^./::g" | tr "\n" "|" | sed -r "s:[.]:.:g")"
+cat $INITRAMFS/$fake_full_path/modules.order | grep -E "$MODULEORDER"/foo/bar > $INITRAMFS/$fake_full_path/_
+mv $INITRAMFS/$fake_full_path/_ $INITRAMFS/$fake_full_path/modules.order
+
+echo "root::0:0::/root:/bin/bash" >$INITRAMFS/etc/passwd
+touch $INITRAMFS/etc/{m,fs}tab
+
+cp init $INITRAMFS
+chmod a+x $INITRAMFS/init
+cp cleanup $INITRAMFS/lib
+chmod a+x $INITRAMFS/lib/cleanup
+ln -s ../init $INITRAMFS/bin/init
+ln -s ../init $INITRAMFS/sbin/init
+cp ../livekitlib $INITRAMFS/lib/
+cp ../.config $INITRAMFS/lib/
+
+cd $INITRAMFS
+find . -print | cpio -o -H newc 2>/dev/null | xz -f --extreme --check=crc32 >$INITRAMFS.img
+echo $INITRAMFS.img
+
+cd ..
+rm -Rf $INITRAMFS
