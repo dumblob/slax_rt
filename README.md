@@ -16,4 +16,4 @@ This repository is a copy of the http://ftp.slax.org/Slax-7.x-development/source
 References
 ----------
 
-*   [official howto](https://rt.wiki.kernel.org/index.php/RT_PREEMPT_HOWTO) on building of the `-rt` kernel (outdated, but you'll figure the right menuconfig options yourself - look at my `-rt` configs from this repository)
+*   [official howto](https://rt.wiki.kernel.org/index.php/RT_PREEMPT_HOWTO) on building of the `-rt` kernel (outdated, but you'll figure the right menuconfig options yourself - look at the `-rt` configs in this repository for inspiration)
